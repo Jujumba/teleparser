@@ -15,10 +15,8 @@ fn main() -> io::Result<()> {
     let chat: Chat = serde_json::from_str(&content).unwrap();
     let stat: ChatStatistics = ChatStatistics::gather(&chat, cli.jobs);
 
-    if let Some(output) = cli.output {
-        let file = fs::File::create(output)?;
-        serde_json::to_writer_pretty(file, &stat)?;
-    }
+    let file = fs::File::create(cli.output)?;
+    serde_json::to_writer_pretty(file, &stat)?;
 
     Ok(())
 }
@@ -28,7 +26,7 @@ struct Cli {
     #[arg(long, short)]
     file: PathBuf,
     #[arg(long, short, default_value = "out.json")]
-    output: Option<PathBuf>,
+    output: PathBuf,
     #[arg(long, short, default_value_t = 12)]
     jobs: usize
 }
@@ -54,7 +52,7 @@ impl<'a> From<String> for Token<'a> {
 struct Chat<'a> {
     name: String,
     #[serde(rename = "type")]
-    _type: ChatType,
+    chat_type: ChatType,
     id: u128,
     messages: Vec<Message<'a>>,
 }
@@ -74,7 +72,7 @@ enum ChatType {
 struct Message<'a> {
     id: u64,
     #[serde(rename = "type")]
-    _type: MessageType,
+    message_type: MessageType,
     date: NaiveDateTime,
     from: Option<Person<'a>>,
     text_entities: Vec<TextEntity>,
@@ -143,10 +141,10 @@ impl<'a> ChatStatistics<'a> {
                     let mut chunk_tokens_map = HashMap::new();
                     let mut chunk_members_tokens_map = HashMap::new();
 
-                    for message in iter.skip(i * messages_per_thread).take(messages_per_thread).filter(|message| message._type != MessageType::Service) {
+                    for message in iter.skip(i * messages_per_thread).take(messages_per_thread).filter(|message| message.message_type != MessageType::Service) {
                         let from = message.from.clone().unwrap(); // okay since we are not copying the actual data
                         for entity in &message.text_entities {
-                            for token in entity.text.split([' ', ',', '.','(', ')', '\'', '\"', '\n', '\t']).filter(|s| !s.is_empty()) {
+                            for token in entity.text.split([' ', ',', '.','(', ')', '-', '!', '?', '\'', '\"', '\n', '\t']).filter(|s| !s.is_empty()) {
                                 let token = Token::from(remove_emojis(token)); // <-- such a performance hit!
                                 update_occurences(token.clone(), &mut chunk_tokens_map);
                                 match chunk_members_tokens_map.get_mut(&from) {
