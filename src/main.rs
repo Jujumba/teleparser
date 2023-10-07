@@ -126,14 +126,15 @@ struct ChatStatistics<'a> {
 }
 impl<'a> ChatStatistics<'a> {
     fn gather(chat: &'a Chat, jobs: usize) -> Self {
-        let num_messages = chat.messages.len();
+        let iter = chat.messages.iter().filter(|message| message.message_type != MessageType::Service);
+
+        let num_messages = iter.clone().count();
         let messages_per_thread = num_messages / jobs;
         let (sender, receiver) = std::sync::mpsc::sync_channel(jobs);
 
         let mut tokens_map = HashMap::new();
         let mut members_tokens_map = HashMap::new();
 
-        let iter = chat.messages.iter();
         std::thread::scope(|s| {
             for i in 0..jobs {
                 let iter = iter.clone();
@@ -142,7 +143,7 @@ impl<'a> ChatStatistics<'a> {
                     let mut chunk_tokens_map = HashMap::new();
                     let mut chunk_members_tokens_map: HashMap<Person<'_>, HashMap<Token<'_>, usize>> = HashMap::new();
 
-                    for message in iter.skip(i * messages_per_thread).take(messages_per_thread).filter(|message| message.message_type != MessageType::Service) {
+                    for message in iter.skip(i * messages_per_thread).take(messages_per_thread) {
                         let from = message.from.clone().unwrap(); // okay since we are not copying the actual data
                         for entity in &message.text_entities {
                             for token in entity.text.split([' ', ',', '.','(', ')', '-', '!', '?', '\'', '\"', '\n', '\t']).filter(|s| !s.is_empty()) {
