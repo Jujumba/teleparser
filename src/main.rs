@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::PathBuf;
 use std::{fs, io};
 
@@ -139,16 +140,16 @@ impl<'a> ChatStatistics<'a> {
                 let sender = sender.clone();
                 s.spawn(move || {
                     let mut chunk_tokens_map = HashMap::new();
-                    let mut chunk_members_tokens_map = HashMap::new();
+                    let mut chunk_members_tokens_map: HashMap<Person<'_>, HashMap<Token<'_>, usize>> = HashMap::new();
 
                     for message in iter.skip(i * messages_per_thread).take(messages_per_thread).filter(|message| message.message_type != MessageType::Service) {
                         let from = message.from.clone().unwrap(); // okay since we are not copying the actual data
                         for entity in &message.text_entities {
                             for token in entity.text.split([' ', ',', '.','(', ')', '-', '!', '?', '\'', '\"', '\n', '\t']).filter(|s| !s.is_empty()) {
                                 let token = Token::from(remove_emojis(token)); // <-- such a performance hit!
-                                update_occurences(token.clone(), &mut chunk_tokens_map);
+                                *chunk_tokens_map.entry(token.clone()).or_insert(0) += 1;
                                 match chunk_members_tokens_map.get_mut(&from) {
-                                    Some(map) => update_occurences(token, map),
+                                    Some(map) => *map.entry(token).or_insert(0) += 1,
                                     None => {
                                         let member_occurences_map = HashMap::from([(token, 1)]);
                                         chunk_members_tokens_map.insert(from.clone(), member_occurences_map);
@@ -157,27 +158,20 @@ impl<'a> ChatStatistics<'a> {
                             } 
                         }
                     }
-
                     sender.send((chunk_tokens_map, chunk_members_tokens_map)).unwrap();
                 });
             }
             for _ in 0..jobs {
-                let (chunk_tokens_map, chunk_members_tokens_map) =  receiver.recv().unwrap();
-                for (recv_elem, recv_occurences) in chunk_tokens_map {
-                    let occurences = *tokens_map.get(&recv_elem).unwrap_or(&0);
-                    tokens_map.insert(recv_elem, occurences + recv_occurences);
-                }
+                let (chunk_tokens_map, chunk_members_tokens_map) = receiver.recv().unwrap();
+                merge_maps_with(&mut tokens_map, chunk_tokens_map, |tokens_map, token, occurences| *tokens_map.entry(token).or_insert(0) += occurences);
                 for (member, map) in chunk_members_tokens_map {
                     match members_tokens_map.get_mut(&member) {
                         None => {
                             members_tokens_map.insert(member, map);
-                        }
-                        Some(outer) => {
-                            for (token, occurences) in map {
-                                let _occurences = *outer.get(&token).unwrap_or(&0);
-                                outer.insert(token, occurences + _occurences);
-                            }
-                        }
+                        },
+                        Some(mergee) => {
+                            merge_maps_with(mergee, map, |mergee, member, occurences| *mergee.entry(member).or_insert(0) += occurences);
+                        },
                     }
                 }
             }
@@ -199,8 +193,8 @@ fn remove_emojis(string: &str) -> String {
     graphemes.filter(is_not_emoji).collect()
 }
 
-#[inline]
-fn update_occurences<'a>(token: Token<'a>, map: &mut HashMap<Token<'a>, usize>) {
-    let occurences = *map.get(&token).unwrap_or(&0);
-    map.insert(token, occurences + 1);
+fn merge_maps_with<K: Eq + PartialEq + Hash, F: Fn(&mut HashMap<K, usize>, K, usize)>(dst: &mut HashMap<K, usize>, src: HashMap<K, usize>, f: F) {
+    for (key, occurences) in src {
+        f(dst, key, occurences)
+    }
 }
