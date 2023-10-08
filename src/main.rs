@@ -2,13 +2,15 @@ use chrono::NaiveDateTime;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use rayon::{prelude::*, current_num_threads};
+use rayon::prelude::*;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::{fs, io};
+
+const SEPARATORS: [char; 12] = [' ', ',', '.','(', ')', '-', '!', '?', '\'', '\"', '\n', '\t'];
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
@@ -19,7 +21,7 @@ fn main() -> io::Result<()> {
 
     let content = fs::read_to_string(cli.file)?;
 
-    let chat: Chat = serde_json::from_str(&content).unwrap();
+    let chat: Chat = serde_json::from_str(&content)?;
     let stat: ChatStatistics = ChatStatistics::gather(&chat);
 
     let file = fs::File::create(cli.output)?;
@@ -55,12 +57,15 @@ impl<'a> From<String> for Token<'a> {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
+struct Id(u128);
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Chat<'a> {
     name: String,
     #[serde(rename = "type")]
     chat_type: ChatType,
-    id: u128,
+    id: Id,
     messages: Vec<Message<'a>>,
 }
 
@@ -139,7 +144,7 @@ struct ChatStatistics<'a> {
 }
 impl<'a> ChatStatistics<'a> {
     pub fn gather(chat: &'a Chat) -> Self {
-        let jobs = current_num_threads();
+        let jobs = rayon::current_num_threads();
 
         let num_messages = chat.messages.len();
         let messages_per_thread = num_messages / jobs;
@@ -154,15 +159,14 @@ impl<'a> ChatStatistics<'a> {
             for message in messages.iter().filter(|message| message.message_type != MessageType::Service) {
                 let from = message.from.clone().unwrap();
                 for entity in message.text_entities.iter().filter(|entity| !entity.text_type.is_meta()) {
-                    for token in entity.text.split([' ', ',', '.','(', ')', '-', '!', '?', '\'', '\"', '\n', '\t']).filter(|s| !s.is_empty()) {
+                    for token in entity.text.split(SEPARATORS).filter(|s| !s.is_empty()) {
                         let token = Token::from(remove_emojis(token)); // <-- such a performance hit!
                         *chunk_tokens_map.entry(token.clone()).or_insert(0) += 1;
-                        match chunk_members_tokens_map.get_mut(&from) {
-                            Some(map) => *map.entry(token).or_insert(0) += 1,
-                            None => {
-                                let member_occurences_map = HashMap::from([(token, 1)]);
-                                chunk_members_tokens_map.insert(from.clone(), member_occurences_map);
-                            }
+                        if let Some(map) =  chunk_members_tokens_map.get_mut(&from) {
+                            *map.entry(token).or_insert(0) += 1;
+                        } else  {
+                            let member_occurences_map = HashMap::from([(token, 1)]);
+                            chunk_members_tokens_map.insert(from.clone(), member_occurences_map);
                         }
                     } 
                 }
@@ -173,13 +177,10 @@ impl<'a> ChatStatistics<'a> {
             let (chunk_tokens_map, chunk_members_tokens_map): (HashMap<Token<'_>, usize>, _) = receiver.recv().unwrap();
             merge_maps_with(&mut tokens_map, chunk_tokens_map, |tokens_map, token, occurences| *tokens_map.entry(token).or_insert(0) += occurences);
             for (member, map) in chunk_members_tokens_map {
-                match members_tokens_map.get_mut(&member) {
-                    None => {
-                        members_tokens_map.insert(member, map);
-                    },
-                    Some(mergee) => {
-                        merge_maps_with(mergee, map, |mergee, member, occurences| *mergee.entry(member).or_insert(0) += occurences);
-                    },
+                if let Some(mergee) = members_tokens_map.get_mut(&member) {
+                    merge_maps_with(mergee, map, |mergee, member, occurences| *mergee.entry(member).or_insert(0) += occurences);
+                } else {
+                    members_tokens_map.insert(member, map);
                 }
             }
         }
@@ -200,7 +201,9 @@ fn remove_emojis(string: &str) -> String {
     graphemes.filter(is_not_emoji).collect()
 }
 
-fn merge_maps_with<K: Eq + PartialEq + Hash, F: Fn(&mut HashMap<K, usize>, K, usize)>(dst: &mut HashMap<K, usize>, src: HashMap<K, usize>, f: F) {
+fn merge_maps_with<K, F>(dst: &mut HashMap<K, usize>, src: HashMap<K, usize>, f: F) 
+where K: Eq + PartialEq + Hash,
+F: Fn(&mut HashMap<K, usize>, K, usize) {
     for (key, occurences) in src {
         f(dst, key, occurences)
     }
